@@ -35,16 +35,9 @@ r, _ = librosa.load(ref_path, sr=None)
 c, _ = librosa.load(clean_path, sr=None)
 n_aec, _ = librosa.load(neuralAEC_est, sr=None)
 
-lms_est = lms(x, r, N=256, mu=0.1)
-nlms_est = nlms(x, r, N=256, mu=0.1)
-
-kalman_est = kalman(x, r, N=256)
 
 outputs = {
     "clean": c,
-    "LMS": lms_est,
-    "NLMS": nlms_est,
-    "Kalman": kalman_est,
     "Neural AEC": n_aec
 }
 
@@ -64,7 +57,6 @@ actual_start_time = (gt_ts[0]['start']/sr)*1000 if gt_ts else 0
 results = {}
 plt.figure(figsize=(12, 12))
 colors = ["#a0e61f", "#26d8d8", "#d644e9", "#2926e2", "#52d829", "#ffa43d", "#f12525"]
-
 
 gt_mask, gt_ts = get_vad_mask(c)
 actual_start_time = (gt_ts[0]['start']/sr)*1000 if gt_ts else 0
@@ -108,24 +100,6 @@ for i, (name, audio) in enumerate(outputs.items()):
         erle_data = calculate_erle_series(x, audio)
         erle_time = np.linspace(0, len(audio)/sr, len(erle_data))
         ax2.plot(erle_time, erle_data, color=colors[i % len(colors)], label=f"{name} ERLE", linewidth=1.5)
-
-# Định dạng Đồ thị 1 (VAD)
-ax1.set_yticks(range(len(outputs)), outputs.keys())
-ax1.set_title("So sánh thời điểm kích hoạt VAD (AEC Impact on VAD Detection)")
-ax1.set_ylabel("Mô hình")
-ax1.grid(True, axis='x', linestyle='--', alpha=0.5)
-ax1.legend(loc='upper right')
-
-# Định dạng Đồ thị 2 (ERLE)
-ax2.set_title("Chỉ số ERLE theo thời gian (Tốc độ hội tụ của bộ lọc)")
-ax2.set_xlabel("Thời gian (giây)")
-ax2.set_ylabel("ERLE (dB)")
-ax2.grid(True, linestyle=':', alpha=0.6)
-ax2.legend(loc='lower right')
-
-plt.tight_layout()
-plt.savefig("AEC_VAD_Full_Analysis.png")
-plt.show()
 
 # 6. In bảng kết quả
 print(f"\n{'Thuật toán':<15} | {'F1':<6} | {'FPR':<6} | {'FNR':<6} | {'Delay(ms)':<10} | {'Conv Time'}")
