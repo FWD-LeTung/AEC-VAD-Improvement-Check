@@ -57,7 +57,7 @@ class ConformerBlock(nn.Module):
         x = x + 0.5 * self.ffn2(self.norm4(x))
         return self.final_norm(x)
 
-class AEC(nn.Module):
+class AECwithVAD(nn.Module):
     def __init__(self, d_model=128, n_fft=512, n_head=8, num_layers=4, kernel_size=15):
         super().__init__()
         self.n_fft = n_fft
@@ -86,12 +86,130 @@ class AEC(nn.Module):
         est_imag = mic_real * mask_imag + mic_imag * mask_real
         vad_logits = self.vad_proj(x)
         return torch.stack([est_real, est_imag], dim=-1)
-    
+
+class AECnoVAD(nn.Module):
+    def __init__(self, d_model=128, n_fft=512, n_head=8, num_layers=4, kernel_size=15, use_checkpoint=True):
+        super().__init__()
+        self.n_fft = n_fft
+        self.n_freq = n_fft // 2 + 1
+        self.input_proj = nn.Linear(self.n_freq * 4, d_model)
+        self.layers = nn.ModuleList([
+            ConformerBlock(d_model, n_head, kernel_size=kernel_size)
+            for _ in range(num_layers)
+        ])
+        self.mask_proj = nn.Linear(d_model, self.n_freq * 2)
+
+    def forward(self, mic_stft, ref_stft):
+        B, F, T, C = mic_stft.shape
+        mic_flat = mic_stft.permute(0, 2, 1, 3).reshape(B, T, F * 2)
+        ref_flat = ref_stft.permute(0, 2, 1, 3).reshape(B, T, F * 2)
+        x = self.input_proj(torch.cat([mic_flat, ref_flat], dim=2))
+        for layer in self.layers:
+            x = layer(x)
+        mask = self.mask_proj(x).view(B, T, F, 2).permute(0, 2, 1, 3)
+        mic_real, mic_imag = mic_stft[..., 0], mic_stft[..., 1]
+        mask_real, mask_imag = mask[..., 0], mask[..., 1]
+        return torch.stack([mic_real * mask_real - mic_imag * mask_imag,
+                           mic_real * mask_imag + mic_imag * mask_real], dim=-1)
+
 def run_inference(model_path, mic_path, ref_path, save_path):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # 1. Load Model
     model = AEC(d_model=128, n_fft=512).to(device)
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.eval()
+    
+    # 2. Load Audio bằng Librosa
+    y_mic, _ = librosa.load(mic_path, sr=16000)
+    y_ref, _ = librosa.load(ref_path, sr=16000)
+
+    # --- SỬA LỖI TẠI ĐÂY: Căn chỉnh độ dài ---
+    min_len = min(len(y_mic), len(y_ref))
+    y_mic = y_mic[:min_len]
+    y_ref = y_ref[:min_len]
+    # ---------------------------------------
+    
+    # 3. Chuẩn bị STFT
+    n_fft, hop_length, win_length = 512, 160, 320
+    window = torch.hann_window(win_length).to(device)
+    
+    def to_stft(y):
+        y_torch = torch.from_numpy(y).float().to(device)
+        stft_complex = torch.stft(y_torch, n_fft=n_fft, hop_length=hop_length, 
+                                  win_length=win_length, window=window, 
+                                  center=True, return_complex=True)
+        return torch.view_as_real(stft_complex).unsqueeze(0) # (1, F, T, 2)
+
+    mic_stft = to_stft(y_mic)
+    ref_stft = to_stft(y_ref)
+
+    # 4. Forward qua model
+    with torch.no_grad():
+        # Bây giờ mic_stft và ref_stft chắc chắn có cùng số khung T
+        est_stft = model(mic_stft, ref_stft)
+
+    # 5. Inverse STFT để về miền thời gian
+    est_complex = torch.complex(est_stft[..., 0], est_stft[..., 1]).squeeze(0)
+    y_est = torch.istft(est_complex, n_fft=n_fft, hop_length=hop_length, 
+                        win_length=win_length, window=window, center=True)
+    
+    # 6. Lưu kết quả
+    output_audio = y_est.cpu().numpy()
+    sf.write(save_path, output_audio, 16000)
+    print(f"--- Đã lưu file kết quả tại: {save_path} ---")
+def run_inference2(model_path, mic_path, ref_path, save_path):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # 1. Load Model
+    model = AECnoVAD(d_model=128, n_fft=512).to(device)
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.eval()
+    
+    # 2. Load Audio bằng Librosa
+    y_mic, _ = librosa.load(mic_path, sr=16000)
+    y_ref, _ = librosa.load(ref_path, sr=16000)
+
+    # --- SỬA LỖI TẠI ĐÂY: Căn chỉnh độ dài ---
+    min_len = min(len(y_mic), len(y_ref))
+    y_mic = y_mic[:min_len]
+    y_ref = y_ref[:min_len]
+    # ---------------------------------------
+    
+    # 3. Chuẩn bị STFT
+    n_fft, hop_length, win_length = 512, 160, 320
+    window = torch.hann_window(win_length).to(device)
+    
+    def to_stft(y):
+        y_torch = torch.from_numpy(y).float().to(device)
+        stft_complex = torch.stft(y_torch, n_fft=n_fft, hop_length=hop_length, 
+                                  win_length=win_length, window=window, 
+                                  center=True, return_complex=True)
+        return torch.view_as_real(stft_complex).unsqueeze(0) # (1, F, T, 2)
+
+    mic_stft = to_stft(y_mic)
+    ref_stft = to_stft(y_ref)
+
+    # 4. Forward qua model
+    with torch.no_grad():
+        # Bây giờ mic_stft và ref_stft chắc chắn có cùng số khung T
+        est_stft = model(mic_stft, ref_stft)
+
+    # 5. Inverse STFT để về miền thời gian
+    est_complex = torch.complex(est_stft[..., 0], est_stft[..., 1]).squeeze(0)
+    y_est = torch.istft(est_complex, n_fft=n_fft, hop_length=hop_length, 
+                        win_length=win_length, window=window, center=True)
+    
+    # 6. Lưu kết quả
+    output_audio = y_est.cpu().numpy()
+    sf.write(save_path, output_audio, 16000)
+    print(f"--- Đã lưu file kết quả tại: {save_path} ---")
+
+def run_inference(model_path, mic_path, ref_path, save_path):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # 1. Load Model
+    model = AECwithVAD(d_model=128, n_fft=512).to(device)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
     

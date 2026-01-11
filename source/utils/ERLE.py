@@ -15,7 +15,7 @@ def calculate_erle_series(mic, est, frame_size=160):
         erle_series.append(10 * np.log10(power_mic / power_est))
     return np.array(erle_series)
 
-def calculate_convergence_time(mic, output, sr=16000, threshold_db=15, frame_len=160):
+def calculate_convergence_time(mic, output, sr=16000, threshold_db=40, frame_len=160):
     """Tính thời gian để ERLE vượt ngưỡng ổn định"""
     min_len = min(len(mic), len(output))
     mic, output = mic[:min_len], output[:min_len]
